@@ -22,6 +22,7 @@ impl Module for MyModule {
                 .with_max_level(log::LevelFilter::Info)
                 .with_tag("dump_dex"),
         );
+        unsafe { GLOBAL_ENV = env as usize; }
         let env = unsafe { JNIEnv::from_raw(env).unwrap() };
         Self { api, env }
     }
@@ -100,6 +101,9 @@ impl Module for MyModule {
                 }
                 None => flog("FAIL resolve cmds_ptr"),
             }
+            // ★ PORTA FINAL: JNI DefineClass (vtable slot 5) — DexProtector define
+            // classe-por-classe com mini-dexes por aqui (fora da libdexfile)
+            hook_jni_define_class();
 
             Ok(())
         };
@@ -117,6 +121,7 @@ impl Module for MyModule {
 }
 
 register_zygisk_module!(MyModule);
+static mut GLOBAL_ENV: usize = 0;
 static mut OLD_OPEN_COMMON: usize = 0;
 static mut OLD_OPEN_COMMON2: usize = 0;
 static mut OLD_CMDS_SZ: usize = 0;
@@ -304,5 +309,78 @@ extern "C" fn new_open_common(base: usize, size: usize) {
     let file_name = format!("/data/data/{}/dexes/{:08x}.dex", package, digest.finalize());
     if let Err(e) = std::fs::write(file_name, dex_data) {
         error!("write file error: {:?}", e);
+    }
+}
+
+// ================= JNI DefineClass hook (vtable slot 5) =================
+// DexProtector define classes individualmente via env->DefineClass com mini-dexes.
+// Slot 5 da JNIEnv function table = DefineClass.
+use std::ffi::{c_char, c_void, CStr};
+
+static mut OLD_DEFINE_CLASS: usize = 0;
+
+fn hook_jni_define_class() {
+    unsafe {
+        // pega a table do env salvo no MyModule — usamos o env do thread atual via
+        // JavaVM? Mais simples: o MyModule guarda env<'static>. Acessamos via global.
+        let e = GLOBAL_ENV as *mut *mut *mut c_void;
+        if e.is_null() { flog("defineclass: sem env"); return; }
+        let tbl = *e; // functions
+        if tbl.is_null() { flog("defineclass: table null"); return; }
+        let slot = tbl.add(5);
+        // página RW pra escrever na table (normalmente RO em libart .data/.rodata? é .data do gJniNativeInterface — pode ser RO)
+        let page = (tbl as usize) & !0xfff;
+        let r = libc::mprotect(page as *mut c_void, 0x4000, libc::PROT_READ | libc::PROT_WRITE);
+        flog(&format!("defineclass: tbl={:p} slot5={:p} mprotect={}", tbl, *slot, r));
+        if r != 0 { return; }
+        OLD_DEFINE_CLASS = *slot as usize;
+        *slot = my_define_class as *mut c_void;
+        flog(&format!("defineclass: HOOKED (old={:x})", OLD_DEFINE_CLASS));
+    }
+}
+
+extern "C" fn my_define_class(
+    env: *mut c_void,
+    name: *const c_char,
+    loader: *mut c_void,
+    buf: *const u8,
+    len: i32,
+) -> *mut c_void {
+    unsafe {
+        let nm = if name.is_null() { "null".to_string() } else {
+            CStr::from_ptr(name).to_string_lossy().to_string()
+        };
+        if len > 4 && !buf.is_null() {
+            let head = std::slice::from_raw_parts(buf, 4);
+            if head == b"dex\n" || head == b"cdex" {
+                flog(&format!("DEFINECLASS dex: {} len={}", nm, len));
+                dump_buf(buf, len as usize, &nm);
+            } else {
+                flog(&format!("DEFINECLASS nãodex: {} len={} magic={:02x?}", nm, len, head));
+            }
+        } else {
+            flog(&format!("DEFINECLASS degenerate: {} len={}", nm, len));
+        }
+        let orig: extern "C" fn(*mut c_void, *const c_char, *mut c_void, *const u8, i32) -> *mut c_void =
+            std::mem::transmute(OLD_DEFINE_CLASS);
+        orig(env, name, loader, buf, len)
+    }
+}
+
+fn dump_buf(buf: *const u8, len: usize, tag: &str) {
+    unsafe {
+        let data = std::slice::from_raw_parts(buf, len);
+        let pkg = std::fs::read_to_string("/proc/self/cmdline")
+            .unwrap_or_default().split('\0').next().unwrap_or("unknown").to_string();
+        let dir = format!("/data/data/{}/dexes", pkg);
+        let _ = std::fs::create_dir_all(&dir);
+        let crc = crc::Crc::<u32>::new(&crc::CRC_32_CD_ROM_EDC);
+        let mut dg = crc.digest();
+        dg.update(data);
+        let fname = format!("{}/dc_{:08x}_{}.dex", dir, dg.finalize(), tag.replace('/', "_"));
+        if std::path::Path::new(&fname).exists() { return; }
+        if let Err(e) = std::fs::write(&fname, data) {
+            flog(&format!("dump err: {}", e));
+        }
     }
 }
