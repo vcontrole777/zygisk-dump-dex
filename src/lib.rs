@@ -323,7 +323,7 @@ fn hook_jni_define_class() {
     unsafe {
         // pega a table do env salvo no MyModule — usamos o env do thread atual via
         // JavaVM? Mais simples: o MyModule guarda env<'static>. Acessamos via global.
-        let e = GLOBAL_ENV as *mut *mut *mut c_void;
+        let e = std::ptr::addr_of!(GLOBAL_ENV).read() as *mut *mut *mut c_void;
         if e.is_null() { flog("defineclass: sem env"); return; }
         let tbl = *e; // functions
         if tbl.is_null() { flog("defineclass: table null"); return; }
@@ -333,9 +333,10 @@ fn hook_jni_define_class() {
         let r = libc::mprotect(page as *mut c_void, 0x4000, libc::PROT_READ | libc::PROT_WRITE);
         flog(&format!("defineclass: tbl={:p} slot5={:p} mprotect={}", tbl, *slot, r));
         if r != 0 { return; }
-        OLD_DEFINE_CLASS = *slot as usize;
+        let oldv = *slot as usize;
+        std::ptr::addr_of_mut!(OLD_DEFINE_CLASS).write(oldv);
         *slot = my_define_class as *mut c_void;
-        flog(&format!("defineclass: HOOKED (old={:x})", OLD_DEFINE_CLASS));
+        flog(&format!("defineclass: HOOKED (old={:x})", oldv));
     }
 }
 
@@ -362,7 +363,7 @@ extern "C" fn my_define_class(
             flog(&format!("DEFINECLASS degenerate: {} len={}", nm, len));
         }
         let orig: extern "C" fn(*mut c_void, *const c_char, *mut c_void, *const u8, i32) -> *mut c_void =
-            std::mem::transmute(OLD_DEFINE_CLASS);
+            std::mem::transmute(std::ptr::addr_of!(OLD_DEFINE_CLASS).read());
         orig(env, name, loader, buf, len)
     }
 }
