@@ -65,6 +65,18 @@ impl Module for MyModule {
                 OLD_OPEN_COMMON =
                     dobby_rs::hook(open_common, new_open_common_wrapper as Address)? as usize
             };
+            // segunda sobrecarga: OpenCommon(base, size, cdex_base, cdex_size, ...) —
+            // ABI limpa: x0=this, x1=base, x2=size
+            match dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art13DexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS0_12VerifyResultE") {
+                Some(oc2) => {
+                    info!("open_common2 addr: {:x}", oc2 as usize);
+                    unsafe {
+                        OLD_OPEN_COMMON2 =
+                            dobby_rs::hook(oc2, new_open_common2_wrapper as Address)? as usize
+                    };
+                }
+                None => error!("open_common2 não resolvido — seguindo só com overload 1"),
+            }
 
             Ok(())
         };
@@ -82,6 +94,38 @@ impl Module for MyModule {
 
 register_zygisk_module!(MyModule);
 static mut OLD_OPEN_COMMON: usize = 0;
+static mut OLD_OPEN_COMMON2: usize = 0;
+
+#[unsafe(naked)]
+pub extern "C" fn new_open_common2_wrapper() {
+    naked_asm!(
+        r#"
+            sub sp, sp, 0x280
+            stp x29, x30, [sp, #0]
+            stp x0, x1, [sp, #0x10]
+            stp x2, x3, [sp, #0x20]
+            stp x4, x5, [sp, #0x30]
+            stp x6, x7, [sp, #0x40]
+            stp x8, x9, [sp, #0x50]
+
+            mov x0, x1
+            mov x1, x2
+            bl {new_open_common}
+
+            ldp x29, x30, [sp, #0]
+            ldp x0, x1, [sp, #0x10]
+            ldp x2, x3, [sp, #0x20]
+            ldp x4, x5, [sp, #0x30]
+            ldp x6, x7, [sp, #0x40]
+            ldp x8, x9, [sp, #0x50]
+            add sp, sp, #0x280
+            adrp x16, {old_open_common2}
+            ldr x16, [x16, #:lo12:{old_open_common2}]
+            br x16"#,
+        new_open_common = sym new_open_common,
+        old_open_common2 = sym OLD_OPEN_COMMON2,
+    );
+}
 
 #[unsafe(naked)]
 pub extern "C" fn new_open_common_wrapper() {
@@ -116,6 +160,13 @@ pub extern "C" fn new_open_common_wrapper() {
 
 extern "C" fn new_open_common(base: usize, size: usize) {
     info!("find dex: base=0x{:x}, size=0x{:x}", base, size);
+
+    // só despeja buffers que são DEX/CompactDEX de verdade (guarda contra ABI errada)
+    let head = unsafe { std::slice::from_raw_parts(base as *const u8, 4.min(size)) };
+    if head != b"dex\n" && head != b"cdex" {
+        info!("skip: magic inválida ({:02x?})", head);
+        return;
+    }
 
     let dex_data = unsafe { std::slice::from_raw_parts(base as *const u8, size) };
     let package = match std::fs::read_to_string("/proc/self/cmdline") {
