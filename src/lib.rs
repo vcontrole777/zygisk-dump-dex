@@ -77,6 +77,28 @@ impl Module for MyModule {
                 }
                 None => error!("open_common2 não resolvido — seguindo só com overload 1"),
             }
+            // CreateMemoryDexStorage(base, size) — x0=this, x1=base, x2=size
+            match dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art13DexFileLoader22CreateMemoryDexStorageEPKhm") {
+                Some(cmds) => {
+                    info!("cmds_sz addr: {:x}", cmds as usize);
+                    unsafe {
+                        OLD_CMDS_SZ =
+                            dobby_rs::hook(cmds, new_cmds_sz_wrapper as Address)? as usize
+                    };
+                }
+                None => error!("CreateMemoryDexStorage(size) não resolvido"),
+            }
+            // CreateMemoryDexStorage(begin, end) — x0=this, x1=begin, x2=end
+            match dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art13DexFileLoader22CreateMemoryDexStorageEPKhS2_") {
+                Some(cmdp) => {
+                    info!("cmds_ptr addr: {:x}", cmdp as usize);
+                    unsafe {
+                        OLD_CMDS_PTR =
+                            dobby_rs::hook(cmdp, new_cmds_ptr_wrapper as Address)? as usize
+                    };
+                }
+                None => error!("CreateMemoryDexStorage(end) não resolvido"),
+            }
 
             Ok(())
         };
@@ -95,6 +117,70 @@ impl Module for MyModule {
 register_zygisk_module!(MyModule);
 static mut OLD_OPEN_COMMON: usize = 0;
 static mut OLD_OPEN_COMMON2: usize = 0;
+static mut OLD_CMDS_SZ: usize = 0;
+static mut OLD_CMDS_PTR: usize = 0;
+
+#[unsafe(naked)]
+pub extern "C" fn new_cmds_sz_wrapper() {
+    naked_asm!(
+        r#"
+            sub sp, sp, 0x280
+            stp x29, x30, [sp, #0]
+            stp x0, x1, [sp, #0x10]
+            stp x2, x3, [sp, #0x20]
+            stp x4, x5, [sp, #0x30]
+            stp x6, x7, [sp, #0x40]
+            stp x8, x9, [sp, #0x50]
+
+            mov x0, x1
+            mov x1, x2
+            bl {new_open_common}
+
+            ldp x29, x30, [sp, #0]
+            ldp x0, x1, [sp, #0x10]
+            ldp x2, x3, [sp, #0x20]
+            ldp x4, x5, [sp, #0x30]
+            ldp x6, x7, [sp, #0x40]
+            ldp x8, x9, [sp, #0x50]
+            add sp, sp, #0x280
+            adrp x16, {old}
+            ldr x16, [x16, #:lo12:{old}]
+            br x16"#,
+        new_open_common = sym new_open_common,
+        old = sym OLD_CMDS_SZ,
+    );
+}
+
+#[unsafe(naked)]
+pub extern "C" fn new_cmds_ptr_wrapper() {
+    naked_asm!(
+        r#"
+            sub sp, sp, 0x280
+            stp x29, x30, [sp, #0]
+            stp x0, x1, [sp, #0x10]
+            stp x2, x3, [sp, #0x20]
+            stp x4, x5, [sp, #0x30]
+            stp x6, x7, [sp, #0x40]
+            stp x8, x9, [sp, #0x50]
+
+            mov x0, x1
+            sub x1, x2, x1
+            bl {new_open_common}
+
+            ldp x29, x30, [sp, #0]
+            ldp x0, x1, [sp, #0x10]
+            ldp x2, x3, [sp, #0x20]
+            ldp x4, x5, [sp, #0x30]
+            ldp x6, x7, [sp, #0x40]
+            ldp x8, x9, [sp, #0x50]
+            add sp, sp, #0x280
+            adrp x16, {old}
+            ldr x16, [x16, #:lo12:{old}]
+            br x16"#,
+        new_open_common = sym new_open_common,
+        old = sym OLD_CMDS_PTR,
+    );
+}
 
 #[unsafe(naked)]
 pub extern "C" fn new_open_common2_wrapper() {
