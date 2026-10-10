@@ -57,10 +57,11 @@ impl Module for MyModule {
                     .set_option(zygisk_rs::ModuleOption::DlcloseModuleLibrary);
                 return Ok(());
             }
+            flog(&format!("DUMP-MATCH {}", package_name));
             info!("dump {}", package_name);
             let open_common = dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art13DexFileLoader10OpenCommonENSt3__110shared_ptrINS_16DexFileContainerEEEPKhmRKNS1_12basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEENS1_8optionalIjEEPKNS_10OatDexFileEbbPSC_PNS_22DexFileLoaderErrorCodeE")
                 .ok_or_else(|| anyhow::anyhow!("resolve symbol error"))?;
-            info!("open_common addr: {:x}", open_common as usize);
+            flog(&format!("ARM oc1(libdexfile) @{:x}", open_common as usize));
             unsafe {
                 OLD_OPEN_COMMON =
                     dobby_rs::hook(open_common, new_open_common_wrapper as Address)? as usize
@@ -69,40 +70,41 @@ impl Module for MyModule {
             // ABI limpa: x0=this, x1=base, x2=size
             match dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art13DexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS0_12VerifyResultE") {
                 Some(oc2) => {
-                    info!("open_common2 addr: {:x}", oc2 as usize);
+                    flog(&format!("ARM oc2(libdexfile) @{:x}", oc2 as usize));
                     unsafe {
                         OLD_OPEN_COMMON2 =
                             dobby_rs::hook(oc2, new_open_common2_wrapper as Address)? as usize
                     };
                 }
-                None => error!("open_common2 não resolvido — seguindo só com overload 1"),
+                None => flog("FAIL resolve oc2"),
             }
             // CreateMemoryDexStorage(base, size) — x0=this, x1=base, x2=size
             match dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art13DexFileLoader22CreateMemoryDexStorageEPKhm") {
                 Some(cmds) => {
-                    info!("cmds_sz addr: {:x}", cmds as usize);
+                    flog(&format!("ARM cmds_sz(libdexfile) @{:x}", cmds as usize));
                     unsafe {
                         OLD_CMDS_SZ =
                             dobby_rs::hook(cmds, new_cmds_sz_wrapper as Address)? as usize
                     };
                 }
-                None => error!("CreateMemoryDexStorage(size) não resolvido"),
+                None => flog("FAIL resolve cmds_sz"),
             }
             // CreateMemoryDexStorage(begin, end) — x0=this, x1=begin, x2=end
             match dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art13DexFileLoader22CreateMemoryDexStorageEPKhS2_") {
                 Some(cmdp) => {
-                    info!("cmds_ptr addr: {:x}", cmdp as usize);
+                    flog(&format!("ARM cmds_ptr(libdexfile) @{:x}", cmdp as usize));
                     unsafe {
                         OLD_CMDS_PTR =
                             dobby_rs::hook(cmdp, new_cmds_ptr_wrapper as Address)? as usize
                     };
                 }
-                None => error!("CreateMemoryDexStorage(end) não resolvido"),
+                None => flog("FAIL resolve cmds_ptr"),
             }
 
             Ok(())
         };
         if let Err(e) = inner() {
+            flog(&format!("pre_app error: {:?}", e));
             error!("pre_app_specialize error: {:?}", e);
         }
     }
@@ -244,13 +246,31 @@ pub extern "C" fn new_open_common_wrapper() {
     );
 }
 
+// log em ARQUIVO — o logcat não mostra nada deste módulo (WHY ainda unknown)
+fn flog(msg: &str) {
+    use std::io::Write;
+    let pkg = std::fs::read_to_string("/proc/self/cmdline")
+        .unwrap_or_default()
+        .split('\0')
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(format!("/data/data/{}/dexes/module.log", pkg))
+    {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
 extern "C" fn new_open_common(base: usize, size: usize) {
-    info!("find dex: base=0x{:x}, size=0x{:x}", base, size);
+    flog(&format!("find dex: base=0x{:x} size=0x{:x}", base, size));
 
     // só despeja buffers que são DEX/CompactDEX de verdade (guarda contra ABI errada)
     let head = unsafe { std::slice::from_raw_parts(base as *const u8, 4.min(size)) };
     if head != b"dex\n" && head != b"cdex" {
-        info!("skip: magic inválida ({:02x?})", head);
+        flog(&format!("skip: magic {:02x?} base=0x{:x}", head, base));
         return;
     }
 
