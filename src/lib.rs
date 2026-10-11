@@ -101,10 +101,6 @@ impl Module for MyModule {
                 }
                 None => flog("FAIL resolve cmds_ptr"),
             }
-            // ★ PORTA FINAL: JNI DefineClass (vtable slot 5) — DexProtector define
-            // classe-por-classe com mini-dexes por aqui (fora da libdexfile)
-            hook_jni_define_class();
-
             Ok(())
         };
         if let Err(e) = inner() {
@@ -113,7 +109,11 @@ impl Module for MyModule {
         }
     }
 
-    fn post_app_specialize(&mut self, _args: &AppSpecializeArgs) {}
+    fn post_app_specialize(&mut self, _args: &AppSpecializeArgs) {
+        // contexto APP completo (SELinux app domain) — logs gravam e ainda é antes
+        // de qualquer código do app (attachBaseContext do DP vem depois disso)
+        hook_jni_define_class();
+    }
 
     fn pre_server_specialize(&mut self, _args: &mut ServerSpecializeArgs) {}
 
@@ -270,7 +270,17 @@ fn flog(msg: &str) {
     }
 }
 
+static mut STATUS_DUMPED: bool = false;
+
 extern "C" fn new_open_common(base: usize, size: usize) {
+    unsafe {
+        if !std::ptr::addr_of!(STATUS_DUMPED).read() {
+            std::ptr::addr_of_mut!(STATUS_DUMPED).write(true);
+            let dc = std::ptr::addr_of!(OLD_DEFINE_CLASS).read();
+            let ndb = std::ptr::addr_of!(OLD_NDB).read();
+            flog(&format!("STATUS: oc1={:x} dc_hook={:x} ndb_hook={:x}", OLD_OPEN_COMMON, dc, ndb));
+        }
+    }
     flog(&format!("find dex: base=0x{:x} size=0x{:x}", base, size));
 
     // só despeja buffers que são DEX/CompactDEX de verdade (guarda contra ABI errada)
