@@ -354,7 +354,7 @@ fn hook_jni_define_class() {
         *slot = my_define_class as *mut c_void;
         flog(&format!("defineclass: HOOKED (old={:x})", oldv));
         // slot 227 = NewDirectByteBuffer(env, addr, cap)
-        let slot227 = tbl.add(227);
+        let slot227 = tbl.add(229); // NewDirectByteBuffer = 229 (227 é DeleteWeakGlobalRef — bug run7/8)
         let old227 = *slot227 as usize;
         std::ptr::addr_of_mut!(OLD_NDB).write(old227);
         *slot227 = my_new_direct_buffer as *mut c_void;
