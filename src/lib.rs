@@ -102,6 +102,18 @@ impl Module for MyModule {
                 }
                 None => flog("FAIL resolve cmds_ptr"),
             }
+            match dobby_rs::resolve_symbol("libssl.so", "SSL_write") {
+                Some(a) => { flog(&format!("ARM SSL_write @{:x}", a as usize));
+                    unsafe { std::ptr::addr_of_mut!(OLD_SSL_WRITE).write(
+                        dobby_rs::hook(a, ssl_write_hook as Address)? as usize); } }
+                None => flog("FAIL resolve SSL_write"),
+            }
+            match dobby_rs::resolve_symbol("libssl.so", "SSL_read") {
+                Some(a) => { flog(&format!("ARM SSL_read @{:x}", a as usize));
+                    unsafe { std::ptr::addr_of_mut!(OLD_SSL_READ).write(
+                        dobby_rs::hook(a, ssl_read_hook as Address)? as usize); } }
+                None => flog("FAIL resolve SSL_read"),
+            }
             Ok(())
         };
         if let Err(e) = inner() {
@@ -422,4 +434,82 @@ extern "C" fn my_new_direct_buffer(env: *mut c_void, addr: *mut c_void, cap: i64
             std::mem::transmute(std::ptr::addr_of!(OLD_NDB).read());
         orig(env, addr, cap)
     }
+}
+
+// ================= SSL capture (gabarito TLS plaintext in-process) =================
+static mut OLD_SSL_WRITE: usize = 0;
+static mut OLD_SSL_READ: usize = 0;
+
+extern "C" fn ssl_log(dir: u8, buf: *const u8, len: isize) {
+    use std::io::Write;
+    if len <= 0 || buf.is_null() { return; }
+    let len = len.min(1 << 20) as usize;
+    let pkg = std::fs::read_to_string("/proc/self/cmdline")
+        .unwrap_or_default().split('\0').next().unwrap_or("unknown").to_string();
+    let _ = std::fs::create_dir_all(format!("/data/data/{}/dexes", pkg));
+    let name = if dir == b'T' { "ssl_tx.bin" } else { "ssl_rx.bin" };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+        .open(format!("/data/data/{}/dexes/{}", pkg, name)) {
+        let _ = f.write_all(&(len as u32).to_le_bytes());
+        let _ = f.write_all(unsafe { std::slice::from_raw_parts(buf, len) });
+    }
+}
+
+extern "C" fn log_tx(buf: *const u8, len: isize) { ssl_log(b'T', buf, len); }
+extern "C" fn log_rx(buf: *const u8, len: isize) { ssl_log(b'R', buf, len); }
+
+#[unsafe(naked)]
+pub extern "C" fn ssl_write_hook() {
+    naked_asm!(
+        r#"
+            sub sp, sp, 0x100
+            stp x29, x30, [sp, #0]
+            stp x0, x1, [sp, #0x10]
+            stp x2, x3, [sp, #0x20]
+
+            mov x0, x1
+            mov x1, x2
+            bl {ltx}
+
+            ldp x29, x30, [sp, #0]
+            ldp x0, x1, [sp, #0x10]
+            ldp x2, x3, [sp, #0x20]
+            add sp, sp, #0x100
+            adrp x16, {old}
+            ldr x16, [x16, #:lo12:{old}]
+            br x16"#,
+        ltx = sym log_tx,
+        old = sym OLD_SSL_WRITE,
+    );
+}
+
+#[unsafe(naked)]
+pub extern "C" fn ssl_read_hook() {
+    naked_asm!(
+        r#"
+            sub sp, sp, 0x100
+            stp x29, x30, [sp, #0]
+            stp x0, x1, [sp, #0x10]
+            stp x2, x3, [sp, #0x20]
+
+            adrp x16, {old}
+            ldr x16, [x16, #:lo12:{old}]
+            blr x16                  // orig(ssl,buf,num) -> x0 = bytes lidos
+            str x0, [sp, #0x30]
+
+            ldr x0, [sp, #0x18]      // buf original (x1 de entrada)
+            ldr x1, [sp, #0x30]      // bytes lidos
+            cmp x1, #0
+            ble 1f
+            bl {lrx}
+        1:
+            ldp x2, x3, [sp, #0x20]
+            ldp x0, x1, [sp, #0x10]
+            ldr x0, [sp, #0x30]      // retorno do orig
+            ldp x29, x30, [sp, #0]
+            add sp, sp, #0x100
+            ret"#,
+        lrx = sym log_rx,
+        old = sym OLD_SSL_READ,
+    );
 }
