@@ -278,7 +278,8 @@ extern "C" fn new_open_common(base: usize, size: usize) {
             std::ptr::addr_of_mut!(STATUS_DUMPED).write(true);
             let dc = std::ptr::addr_of!(OLD_DEFINE_CLASS).read();
             let ndb = std::ptr::addr_of!(OLD_NDB).read();
-            flog(&format!("STATUS: oc1={:x} dc_hook={:x} ndb_hook={:x}", OLD_OPEN_COMMON, dc, ndb));
+            let oc1 = std::ptr::addr_of!(OLD_OPEN_COMMON).read();
+            flog(&format!("STATUS: oc1={:x} dc_hook={:x} ndb_hook={:x}", oc1, dc, ndb));
         }
     }
     flog(&format!("find dex: base=0x{:x} size=0x{:x}", base, size));
