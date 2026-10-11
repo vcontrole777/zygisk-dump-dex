@@ -260,6 +260,7 @@ fn flog(msg: &str) {
         .next()
         .unwrap_or("unknown")
         .to_string();
+    let _ = std::fs::create_dir_all(format!("/data/data/{}/dexes", pkg));
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -318,11 +319,10 @@ extern "C" fn new_open_common(base: usize, size: usize) {
 use std::ffi::{c_char, c_void, CStr};
 
 static mut OLD_DEFINE_CLASS: usize = 0;
+static mut OLD_NDB: usize = 0;
 
 fn hook_jni_define_class() {
     unsafe {
-        // pega a table do env salvo no MyModule — usamos o env do thread atual via
-        // JavaVM? Mais simples: o MyModule guarda env<'static>. Acessamos via global.
         let e = std::ptr::addr_of!(GLOBAL_ENV).read() as *mut *mut *mut c_void;
         if e.is_null() { flog("defineclass: sem env"); return; }
         let tbl = *e; // functions
@@ -337,6 +337,12 @@ fn hook_jni_define_class() {
         std::ptr::addr_of_mut!(OLD_DEFINE_CLASS).write(oldv);
         *slot = my_define_class as *mut c_void;
         flog(&format!("defineclass: HOOKED (old={:x})", oldv));
+        // slot 227 = NewDirectByteBuffer(env, addr, cap)
+        let slot227 = tbl.add(227);
+        let old227 = *slot227 as usize;
+        std::ptr::addr_of_mut!(OLD_NDB).write(old227);
+        *slot227 = my_new_direct_buffer as *mut c_void;
+        flog(&format!("newdirectbb: HOOKED (old={:x})", old227));
     }
 }
 
@@ -383,5 +389,21 @@ fn dump_buf(buf: *const u8, len: usize, tag: &str) {
         if let Err(e) = std::fs::write(&fname, data) {
             flog(&format!("dump err: {}", e));
         }
+    }
+}
+
+extern "C" fn my_new_direct_buffer(env: *mut c_void, addr: *mut c_void, cap: i64) -> *mut c_void {
+    unsafe {
+        if !addr.is_null() && cap > 4 {
+            let b = addr as *const u8;
+            let head = std::slice::from_raw_parts(b, 4);
+            if head == b"dex\n" || head == b"cdex" {
+                flog(&format!("NDB-DEX: addr={:p} cap={:x}", addr, cap));
+                dump_buf(b, cap as usize, "ndb");
+            }
+        }
+        let orig: extern "C" fn(*mut c_void, *mut c_void, i64) -> *mut c_void =
+            std::mem::transmute(std::ptr::addr_of!(OLD_NDB).read());
+        orig(env, addr, cap)
     }
 }
