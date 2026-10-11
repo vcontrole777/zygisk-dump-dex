@@ -52,6 +52,7 @@ impl Module for MyModule {
             let find: bool = file_content
                 .split("\n")
                 .any(|item| item.trim() == package_name);
+            unsafe { std::ptr::addr_of_mut!(PKG_MATCH).write(find); }
 
             if !find {
                 self.api
@@ -110,9 +111,12 @@ impl Module for MyModule {
     }
 
     fn post_app_specialize(&mut self, _args: &AppSpecializeArgs) {
-        // contexto APP completo (SELinux app domain) — logs gravam e ainda é antes
-        // de qualquer código do app (attachBaseContext do DP vem depois disso)
-        hook_jni_define_class();
+        // SÓ no pacote-alvo (o gate do pre gravou PKG_MATCH). Sem isso o hook
+        // patcheava a vtable JNI em TODOS os processos (SystemUI crash-loop —
+        // bug da run7). Contexto app completo: logs gravam, e ainda é antes do
+        // attachBaseContext do DP.
+        let m = unsafe { std::ptr::addr_of!(PKG_MATCH).read() };
+        if m { hook_jni_define_class(); }
     }
 
     fn pre_server_specialize(&mut self, _args: &mut ServerSpecializeArgs) {}
@@ -122,6 +126,7 @@ impl Module for MyModule {
 
 register_zygisk_module!(MyModule);
 static mut GLOBAL_ENV: usize = 0;
+static mut PKG_MATCH: bool = false;
 static mut OLD_OPEN_COMMON: usize = 0;
 static mut OLD_OPEN_COMMON2: usize = 0;
 static mut OLD_CMDS_SZ: usize = 0;
